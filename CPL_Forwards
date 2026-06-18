@@ -1,0 +1,634 @@
+---
+title: "CPL_Forwards"
+author: "Atharva Vichare"
+date: "2026-06-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## R libraries 
+```{r}
+
+library(jsonlite)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(patchwork)
+library(stringr)
+library(jpeg)
+library(png)
+library(grid)
+library(showtext)
+library(janitor)
+
+font_add_google("Montserrat", "montserrat")
+
+showtext_auto()
+
+```
+
+
+
+# Filter out forwards only 
+```{r}
+focused_player_stats <- players_raw %>%
+  select(
+    first_name = mediaFirstName,
+    last_name = mediaLastName,
+    team = team_name,
+    position = roleLabel,
+    stats,
+    nationality
+  ) %>%
+  # NUKE EVERYONE WHO ISN'T A FORWARD RIGHT HERE
+  filter(position == "Forward") %>%
+  
+  # Now do the heavy lifting only on the forwards
+  unnest(stats) %>%
+  select(first_name, last_name, team, position, statsLabel, statsValue, nationality) %>%
+  
+ filter(statsLabel %in% c(
+  # Identifiers / Base
+  "Minutes played",
+  "Games played",   
+  
+  # Attacking
+  "Total Shots",
+  "Shots On Target ( inc goals )",
+  "Goals",
+  "Goals Openplay",
+  "Total Big Chances Scored",
+  "Total Big Chances Missed",
+  "Total Touches In Opposition Box",
+  
+  # Creation 
+  "Goal Assists",
+  "Key Passes (Attempt Assists)",
+  "Total Big Chances Created",
+  "Progressive Carries",
+  "Successful Dribbles",
+  "Unsuccessful Dribbles",
+  
+  # Physical
+  "Aerial Duels Won Percentage",
+  "Duels Won Percentage",
+  "Recoveries",
+  "Tackles Won",
+  "Total Fouls Won"
+)) %>% 
+  
+  # Force values to be numeric
+  mutate(statsValue = as.numeric(statsValue)) %>%
+  # Nuke duplicate stat records for the same player, team, and metric
+  distinct(first_name, last_name, team, position, statsLabel, .keep_all = TRUE) %>%
+  
+  pivot_wider(
+    names_from = statsLabel,
+    values_from = statsValue
+  ) %>%
+  clean_names()  
+
+```
+
+
+# Furhter drill down and make new features 
+```{r}
+
+pizza_per90 <- focused_player_stats %>%
+  
+  # Apply minutes filter 
+  filter(minutes_played >= 750) %>%
+  
+  mutate(
+    # ATTACKING (per-90s)
+    goals_per_90                = (goals / minutes_played) * 90,
+    shots_per_90                = (total_shots / minutes_played) * 90,
+    shots_on_target_per_90      = (shots_on_target_inc_goals / minutes_played) * 90,
+    box_touches_per_90          = (total_touches_in_opposition_box / minutes_played) * 90,
+    
+    # percentage 
+    big_chance_conversion_pct   = ifelse(
+      (total_big_chances_scored + total_big_chances_missed) > 0,
+      total_big_chances_scored / (total_big_chances_scored + total_big_chances_missed),
+      0
+    ),
+    # shot accuracy 
+    shots_on_target_pct = ifelse(
+      total_shots > 0,
+      shots_on_target_inc_goals / total_shots,
+      0
+    ),
+    
+   
+    # CREATION (per-90s)
+    assists_per_90              = (goal_assists / minutes_played) * 90,
+    key_passes_per_90           = (key_passes_attempt_assists / minutes_played) * 90,
+    big_chances_created_per_90  = (total_big_chances_created / minutes_played) * 90,
+    progressive_carries_per_90  = (progressive_carries / minutes_played) * 90,
+    
+    # percentage 
+    dribble_success_rate        = ifelse(
+      (successful_dribbles + unsuccessful_dribbles) > 0,
+      successful_dribbles / (successful_dribbles + unsuccessful_dribbles),
+      0
+    ),
+    
+    
+    # PHYSICAL
+    recoveries_per_90           = (recoveries / minutes_played) * 90,
+    tackles_won_per_90          = (tackles_won / minutes_played) * 90,
+    fouls_won_per_90            = (total_fouls_won / minutes_played) * 90
+    
+    # aerial_duels_won_percentage and duels_won_percentage 
+    # already rates from API — no calculation needed
+    
+  ) %>%
+  
+  # Keep only what we need going forward
+  select(
+    first_name, last_name, team, position,
+    games_played, minutes_played,goals,nationality,
+    
+    # Attacking
+    goals_per_90, shots_per_90,
+    shots_on_target_per_90, box_touches_per_90, big_chance_conversion_pct,shots_on_target_pct,
+    
+    # Creation
+    assists_per_90, key_passes_per_90, big_chances_created_per_90,
+    progressive_carries_per_90, dribble_success_rate,
+    
+    # Physical
+    aerial_duels_won_percentage, duels_won_percentage,
+    recoveries_per_90, tackles_won_per_90, fouls_won_per_90
+  )%>%
+  
+  
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+
+
+```
+
+
+# Calculate league means 
+
+```{r}
+
+# Percentage columns excluded deliberately
+
+league_means <- pizza_per90 %>%
+  summarise(
+    # Attacking
+    goals_per_90_mean               = mean(goals_per_90, na.rm = TRUE),
+    shots_per_90_mean               = mean(shots_per_90, na.rm = TRUE),
+    shots_on_target_per_90_mean     = mean(shots_on_target_per_90, na.rm = TRUE),
+    box_touches_per_90_mean         = mean(box_touches_per_90, na.rm = TRUE),
+    
+    # Creation
+    assists_per_90_mean             = mean(assists_per_90, na.rm = TRUE),
+    key_passes_per_90_mean          = mean(key_passes_per_90, na.rm = TRUE),
+    big_chances_created_per_90_mean = mean(big_chances_created_per_90, na.rm = TRUE),
+    progressive_carries_per_90_mean = mean(progressive_carries_per_90, na.rm = TRUE),
+    
+    # Physical
+    recoveries_per_90_mean          = mean(recoveries_per_90, na.rm = TRUE),
+    tackles_won_per_90_mean         = mean(tackles_won_per_90, na.rm = TRUE),
+    fouls_won_per_90_mean           = mean(fouls_won_per_90, na.rm = TRUE)
+  )%>%
+  
+  
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+
+
+print(league_means)
+
+```
+
+# Shrinkage code 
+```{r}
+
+pizza_shrunk <- pizza_per90 %>%
+  mutate(
+    
+    # ATTACKING — shrink toward league mean
+    goals_per_90               = (goals_per_90 * minutes_played + league_means$goals_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    shots_per_90               = (shots_per_90 * minutes_played + league_means$shots_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    shots_on_target_per_90     = (shots_on_target_per_90 * minutes_played + league_means$shots_on_target_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    box_touches_per_90         = (box_touches_per_90 * minutes_played + league_means$box_touches_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    
+
+    # CREATION — shrink toward league mean
+    assists_per_90             = (assists_per_90 * minutes_played + league_means$assists_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    key_passes_per_90          = (key_passes_per_90 * minutes_played + league_means$key_passes_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    big_chances_created_per_90 = (big_chances_created_per_90 * minutes_played + league_means$big_chances_created_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    progressive_carries_per_90 = (progressive_carries_per_90 * minutes_played + league_means$progressive_carries_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+ 
+    # PHYSICAL — shrink toward league mean
+    recoveries_per_90          = (recoveries_per_90 * minutes_played + league_means$recoveries_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    tackles_won_per_90         = (tackles_won_per_90 * minutes_played + league_means$tackles_won_per_90_mean * 900) / 
+                                  (minutes_played + 900),
+    
+    fouls_won_per_90           = (fouls_won_per_90 * minutes_played + league_means$fouls_won_per_90_mean * 900) / 
+                                  (minutes_played + 900)
+    
+    # NO SHRINK — percentage columns left as is
+    # big_chance_conversion_pct
+    # dribble_success_rate
+    # aerial_duels_won_percentage
+    # duels_won_percentage
+    
+  )%>%
+  
+  
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+
+pizza_shrunk <- pizza_shrunk %>%
+  mutate(across(where(is.numeric), ~replace_na(.x, 0)))
+
+
+```
+
+# Player percentiles 
+```{r}
+
+pizza_percentiles <- pizza_shrunk %>%
+  mutate(
+    
+    # Attacking
+    goals_per_90_rank               = round(percent_rank(goals_per_90) * 100, 0),
+    shots_per_90_rank               = round(percent_rank(shots_per_90) * 100, 0),
+    shots_on_target_per_90_rank     = round(percent_rank(shots_on_target_per_90) * 100, 0),
+    box_touches_per_90_rank         = round(percent_rank(box_touches_per_90) * 100, 0),
+    big_chance_conversion_pct_rank  = round(percent_rank(big_chance_conversion_pct) * 100, 0),
+    shots_on_target_pct_rank = round(percent_rank(shots_on_target_pct) * 100, 0),
+    
+   # Creation 
+    assists_per_90_rank             = round(percent_rank(assists_per_90) * 100, 0),
+    key_passes_per_90_rank          = round(percent_rank(key_passes_per_90) * 100, 0),
+    big_chances_created_per_90_rank = round(percent_rank(big_chances_created_per_90) * 100, 0),
+    progressive_carries_per_90_rank = round(percent_rank(progressive_carries_per_90) * 100, 0),
+    dribble_success_rate_rank       = round(percent_rank(dribble_success_rate) * 100, 0),
+    
+  
+    # Physical
+    aerial_duels_won_percentage_rank = round(percent_rank(aerial_duels_won_percentage) * 100, 0),
+    duels_won_percentage_rank        = round(percent_rank(duels_won_percentage) * 100, 0),
+    recoveries_per_90_rank           = round(percent_rank(recoveries_per_90) * 100, 0),
+    tackles_won_per_90_rank          = round(percent_rank(tackles_won_per_90) * 100, 0),
+    fouls_won_per_90_rank            = round(percent_rank(fouls_won_per_90) * 100, 0)
+  )%>%
+  
+  
+  mutate(across(where(is.numeric), ~ round(.x, 2)))
+
+```
+
+```{r}
+
+pizza_percentiles %>%
+  select(first_name, last_name, team, minutes_played,
+         goals_per_90_rank, assists_per_90_rank, nationality, 
+         progressive_carries_per_90_rank) %>%
+  arrange(desc(goals_per_90_rank)) %>%
+  print(n = 10)
+
+```
+
+# CPL Player Archtypes 
+```{r}
+
+#Define values in each slice before doing archtypes 
+
+# Attacking slices
+finishing_slices <- c(
+  "goals_per_90_rank",
+  "shots_on_target_pct_rank",
+  "shots_per_90_rank",
+  "shots_on_target_per_90_rank",
+  "box_touches_per_90_rank",
+  "big_chance_conversion_pct_rank"
+)
+
+# Creation slices
+creation_slices <- c(
+  "assists_per_90_rank",
+  "key_passes_per_90_rank",
+  "big_chances_created_per_90_rank",
+  "progressive_carries_per_90_rank",
+  "dribble_success_rate_rank"
+)
+
+# Physical slices
+physical_slices <- c(
+  "aerial_duels_won_percentage_rank",
+  "duels_won_percentage_rank",
+  "recoveries_per_90_rank",
+  "tackles_won_per_90_rank",
+  "fouls_won_per_90_rank"
+)
+
+
+# Create player(forward) archtypes 
+
+
+cpl_player_archetypes <- pizza_percentiles %>%
+  rowwise() %>%
+  mutate(
+    finishing_score   = round(mean(c_across(all_of(finishing_slices))), 0),
+    creation_score    = round(mean(c_across(all_of(creation_slices))), 0),
+    physical_score    = round(mean(c_across(all_of(physical_slices))), 0),
+    max_score         = max(c(finishing_score, creation_score, physical_score))
+  ) %>%
+  ungroup() %>%
+
+  mutate(
+    archetype = case_when(
+      
+      # The rare all-rounder — elite across all three dimensions
+      finishing_score >= 70 & creation_score >= 60 & physical_score >= 60 ~ "Complete Forward",
+      
+      # Pure goalscorer — lethal but doesn't contribute much else
+      finishing_score >= 70 & creation_score < 40 ~ "Poacher",
+      
+      # High press, high recoveries, high tackles — energetic forward
+      physical_score >= 70 & recoveries_per_90_rank >= 70 & tackles_won_per_90_rank >= 70 ~ "Pressing Forward",
+      
+      # Wins headers, dominates duels, aerial threat
+      physical_score >= 70 & aerial_duels_won_percentage_rank >= 70 ~ "Target Forward",
+      
+      # Creates more than he scores
+      creation_score > finishing_score & creation_score >= 60 ~ "Creator Forward",
+      
+      # Decent creator and physically involved but not a scorer
+      creation_score >= 50 & finishing_score < 60 & physical_score >= 55 ~ "Support Forward",
+      
+      # Nobody home across all three
+      max_score < 45 | (finishing_score < 35 & creation_score < 35) ~ "Low Impact Forward",
+      
+      # Decent across the board but not elite anywhere
+      TRUE ~ "Balanced Forward"
+    )
+  ) %>%
+
+  select(
+    first_name, last_name, team, minutes_played,
+    finishing_score, creation_score, physical_score, archetype, nationality
+  ) %>%
+  arrange(desc(finishing_score))
+
+
+print(cpl_player_archetypes)
+
+```
+
+# Building a piiza chart 
+
+```{r warning=FALSE, message=FALSE}
+
+build_pizza <- function(player_data, slice_columns, chart_title) {
+  plot_data <- player_data %>%
+    select(all_of(slice_columns)) %>%
+    pivot_longer(cols = everything(), names_to = "metric", values_to = "percentile") %>%
+    mutate(
+      metric = metric %>%
+        str_replace_all("shots_on_target_pct_rank", "Shot Accuracy") %>%
+        str_replace_all("_per_90_rank", "") %>%
+        str_replace_all("_pct_rank", "") %>%
+        str_replace_all("_percentage_rank", "") %>%
+        str_replace_all("_rank", "") %>%
+        str_replace_all("_", "\n") %>%
+        str_to_title()
+    )
+  
+  ggplot(plot_data, aes(x = metric, y = percentile, fill = percentile)) +
+    geom_hline(yintercept = c(25, 50, 75, 100), color = "gray75", linetype = "dashed", linewidth = 0.4) +
+    geom_bar(stat = "identity", color = "white", linewidth = 0.5, width = 1, alpha = 0.85) +
+    
+    geom_text(aes(label = percentile), vjust = 1.5, size = 3.5, fontface = "bold", color = "gray15", family = "montserrat") +
+    
+    coord_polar() +
+    scale_y_continuous(limits = c(0, 100), breaks = c(25, 50, 75, 100)) +
+    scale_fill_gradient2(
+      low = "#1B365D",      
+      mid = "#f5f5f5",      
+      high = "#C8102E",    
+      midpoint = 50
+    ) +
+    
+    # 1. Lock in the minimal theme
+    theme_minimal(base_family = "montserrat") + 
+    labs(title = chart_title) +
+    theme(
+      # 2. Pull the title down slightly to close the gap
+      plot.title = element_text(face = "bold", size = 13, hjust = 0.5, family = "montserrat", margin = margin(b = -15)),
+      
+      axis.title = element_blank(),
+      axis.text.y = element_blank(),
+      axis.text.x = element_text(size = 8, face = "bold", family = "montserrat"),
+      legend.position = "none",
+      panel.grid.major.y = element_blank(), 
+      panel.grid.major.x = element_line(color = "gray85", linetype = "dashed"),
+      
+      # 3. Bulletproof transparency so the grey boxes NEVER come back
+      panel.background = element_rect(fill = "transparent", color = NA),
+      plot.background = element_rect(fill = "transparent", color = NA)
+    )
+}
+
+# TEST DATA — using Samuel Salte 
+player_data <- pizza_percentiles %>% filter(first_name == "Samuel", last_name == "Salter")
+player_archetype <- cpl_player_archetypes %>% filter(first_name == "Samuel", last_name == "Salter")
+
+full_name <- paste(player_data$first_name, player_data$last_name)
+team_name <- player_data$team
+archetype <- player_archetype$archetype
+minutes   <- player_data$minutes_played
+goals     <- player_data$goals
+games <- player_data$games_played
+nationality <- player_data$nationality
+
+# STRENGTHS / WEAKNESSES / COMMENT
+
+all_ranks <- player_data %>%
+  select(ends_with("_rank")) %>%
+  pivot_longer(everything(), names_to = "metric", values_to = "percentile") %>%
+  mutate(metric_clean = metric %>%
+    str_replace_all("_per_90_rank", "") %>%
+    str_replace_all("_pct_rank", "") %>%
+    str_replace_all("_percentage_rank", "") %>%
+    str_replace_all("_rank", "") %>%
+    str_replace_all("_", " ") %>%
+    str_to_title()) %>%
+  arrange(desc(percentile))
+
+strengths  <- head(all_ranks, 2)
+weaknesses <- tail(all_ranks, 2)
+
+strength_text  <- paste0("• ", strengths$metric_clean, collapse = "\n")
+weakness_text  <- paste0("• ", weaknesses$metric_clean, collapse = "\n")
+
+goal_rank <- pizza_percentiles %>%
+  mutate(rank_pos = rank(-goals_per_90)) %>%
+  filter(first_name == player_data$first_name, last_name == player_data$last_name) %>%
+  pull(rank_pos)
+
+comment_text <- paste0(full_name, " ranks #", goal_rank, " of 30 CPL forwards in goals per 90 minutes this season, fitting the profile of a ",
+  tolower(archetype), ".")
+
+# Load the league logo
+logo_img <- png::readPNG("Cpl.png")
+logo_grob <- grid::rasterGrob(logo_img, interpolate = TRUE)
+
+
+# PANEL 1 — TOP RED BAR 
+top_bar <- ggplot() +
+  theme_void() +
+  theme(plot.background = element_rect(fill = "#C8102E", color = NA)) +
+  
+  # logo to the absolute left edge 
+  annotation_custom(logo_grob, xmin = 0.01, xmax = 0.05, ymin = -0.6, ymax = 0.6) +
+  
+  # text right next to it
+  annotate("text", x = 0.06, y = 0, label = "CPL", size = 9, fontface = "bold", color = "white", hjust = 0) +
+  
+  coord_cartesian(xlim = c(0, 1), ylim = c(-1, 1), expand = FALSE)
+
+
+summary_text <- paste0(
+  player_data$last_name, " enjoyed a prolific campaign, dominating the league in goals and shot volume.",
+  "While his creative output and progression remain limited, \nhis lethal finishing and frequent",
+  "box touches make him a premier penalty-box threat. \nRanking #", goal_rank, " of 30 CPL forwards in",
+  "goals per 90 minutes, he perfectly fits the tactical profile of a ", tolower(archetype), "."
+)
+
+
+# PANEL 2 - SUMMARY
+
+team_img <- png::readPNG("athletico.png")
+team_grob <- grid::rasterGrob(team_img, interpolate = TRUE)
+
+header_panel <- ggplot() +
+  theme_void() +
+  theme(plot.margin = margin(t = 15, r = 15, b = 10, l = 0)) + 
+  
+  # Player Name
+  annotate("text", x = 0.01, y = 0.70, label = toupper(full_name), size = 11, fontface = "bold", hjust = 0, color = "black", family = "montserrat") +
+  
+  # Nationality Text & Pipe 
+  annotate("text", x = 0.01, y = 0.25, label = paste0((nationality), "  |"), size = 6, fontface = "bold", color = "#C8102E", hjust = 0, family = "montserrat") +
+  
+  # The Logo 
+  annotation_custom(team_grob, xmin = 0.07, xmax = 0.10, ymin = 0.10, ymax = 0.40) +
+  
+  # The Team Name 
+  annotate("text", x = 0.10, y = 0.2, label = team_name, size = 6, fontface = "bold", color = "#C8102E", hjust = 0, family = "montserrat") +
+  
+  # Tactical Summary Paragraph 
+  annotate("text", x = 0.25, y = 0.5, label = summary_text, size = 4.2, color = "gray25", hjust = 0, family = "montserrat", lineheight = 1.2) +
+  
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE)
+
+
+summary_panel <- ggplot() +
+  theme_void() +
+  theme(plot.margin = margin(t = 10, r = 0, b = 15, l = 0)) + 
+  annotate("text", x = 0.01, y = 0.5, label = summary_text, size = 4.5, color = "gray25", hjust = 0, family = "montserrat", lineheight = 1.2) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE)
+
+
+img <- jpeg::readJPEG("player.jpg") 
+img_grob <- rasterGrob(img, interpolate = TRUE)
+
+
+# PANEL 3 — SIDEBAR PROFILE 
+
+silhouette_panel <- ggplot() +
+  theme_void() +
+  
+  # Anchor the player image to the top portion of the panel
+  annotation_custom(img_grob, xmin = 0, xmax = 1, ymin = 0.35, ymax = 0.95) + 
+  
+  # Stack the metrics cleanly underneath with plenty of vertical breathing room
+  annotate("text", x = 0.5, y = 0.24, label = paste0(games, " Matches"), size = 5.5, fontface = "bold", color = "gray25", hjust = 0.5) +
+  annotate("text", x = 0.5, y = 0.16, label = paste0(goals, " Goals"), size = 5.5, fontface = "bold", color = "gray25", hjust = 0.5) +
+  annotate("text", x = 0.5, y = 0.08, label = paste0(minutes, " Mins"), size = 5.5, fontface = "bold", color = "gray25", hjust = 0.5) +
+  
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE)
+
+
+# PANEL 4 — STRENGTHS
+
+strengths_panel <- ggplot() +
+  theme_void() +
+  annotate("text", x = 0, y = 0.9, label = "STRENGTHS", size = 5, fontface = "bold", hjust = 0, color = "#1a9850") +
+  annotate("text", x = 0, y = 0.6, label = strength_text, size = 4, hjust = 0, vjust = 1) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+
+
+# PANEL 5 — WEAKNESSES 
+
+weaknesses_panel <- ggplot() +
+  theme_void() +
+  annotate("text", x = 0, y = 0.9, label = "ROOM FOR IMPROVEMENT", size = 5, fontface = "bold", hjust = 0, color = "#d73027") +
+  annotate("text", x = 0, y = 0.6, label = weakness_text, size = 4, hjust = 0, vjust = 1) +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1))
+
+# PANEL 6 — FOOTER CREDITS 
+footer_panel <- ggplot() +
+  theme_void() +
+  annotate("rect", xmin = 0, xmax = 1, ymin = 0, ymax = 1, fill = "gray95") +
+  # x = 0.98 and hjust = 1 locks the text to the right side
+  annotate("text", x = 0.98, y = 0.5, label = "Data: CanPL(2025)  |  Viz: Atharva", size = 4.5, fontface = "italic", color = "gray50", hjust = 1, family = "montserrat") +
+  coord_cartesian(xlim = c(0, 1), ylim = c(0, 1), expand = FALSE)
+
+
+# PIZZA CHARTS 
+p1 <- build_pizza(player_data, finishing_slices, "Attacking") + theme(plot.margin = margin(t = 0, r = 10, b = 20, l = 10))
+p2 <- build_pizza(player_data, creation_slices, "Creation") + theme(plot.margin = margin(t = 0, r = 10, b = 20, l = 10))
+p3 <- build_pizza(player_data, physical_slices, "Physical") + theme(plot.margin = margin(t = 0, r = 10, b = 20, l = 10))
+
+
+
+# FINAL ASSEMBLY
+
+top_middle <- (silhouette_panel | p1 | p2 | p3) + 
+  plot_layout(widths = c(0.8, 1, 1, 1))
+
+# Text blocks underneath
+bottom_middle <- (strengths_panel | weaknesses_panel) + 
+  plot_layout(widths = c(1, 1))
+
+# Stack charts on top of text blocks
+middle_section <- (top_middle / bottom_middle) + 
+  plot_layout(heights = c(4, 1))
+
+# Compile everything together
+final_card <- (top_bar / header_panel / middle_section / footer_panel) + 
+  plot_layout(heights = c(0.4, 0.6, 5, 0.3)) 
+
+print(final_card)
+
+```
